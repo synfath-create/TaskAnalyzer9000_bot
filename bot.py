@@ -1,73 +1,285 @@
-Таск #1
+import os
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    CommandHandler,
+    CallbackQueryHandler,
+    filters,
+)
+from openai import OpenAI
 
-Сценарий 1: Coin Volcano — Парень в квартире 
-Формат: 9:16
+# ── Логирование ───────────────────────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-Персонаж: Парень индийской внешности (20–30 лет), опрятный, эмоциональный, сидит на диване в квартире.
-Телефон в руках: Современный смартфон.
-Валюта: Символ ₹ или INR.
-Акценты: Выигрыши и множители — крупные, золотые/зеленые.
-Субтитры: Динамические, на английском (так лучше для этого ГЕО), появляются синхронно с речью.
+# ── Клиент OpenAI ─────────────────────────────────────────────────────────────
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-Сцена 1: Хук (0:00 – 0:05)
-Речь: «Брат, завязывай с Chicken Road. Это вчерашний день, там ловить нечего. Сейчас все нормальные ребята перешли в Coin Volcano — вот где настоящие иксы! Я серьезно, это сейчас самая горячая тема, и о ней пока знают не многие».
-В кадре: Актер активно жестикулирует, отмахивается (жест «нет»). В руке телефон.
-Рядом с головой всплывает иконка Chicken Road, перечеркнутая жирным красным крестом. Затем она эффектно (с сиянием и искрами) сменяется логотипом Coin Volcano.
-Текст на экране: «STOP CHICKEN ROAD!» ➡️ «COIN VOLCANO IS HERE!»
+# ── Системный промпт ──────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """Ты — менеджер по рекламным задачам. Твоя работа — аккуратно и точно структурировать входящий бриф или задачу.
 
-Сцена 2: Сравнение (0:05 – 0:12)
-Речь: «Помнишь, как Chicken Road в самом начале давал всем нереально поднять? Так вот, Coin Volcano сейчас в той же фазе — он просто засыпает монетами, чтобы привлечь народ. Это твой шанс зайти первым, пока лавочку не прикрыли».
-В кадре: Актер подносит телефон ближе к камере, указывая на него, на телефоне актера анимация геймплея.
-Эффекты: Золотые монеты, вылетающие из-под логотипа игры.
+СТРОГИЕ ПРАВИЛА:
+- Никаких смайлов, emoji, звёздочек, украшений.
+- Никаких пояснений, интерпретаций, «простых слов» — только факты из задачи.
+- Комментарий заказчика — копируешь ДОСЛОВНО, без единого изменения.
+- Если поле не указано в задаче — пишешь: не указано.
+- Никаких вводных фраз типа «Конечно!», «Вот структура», «Отлично» и т.п.
 
-Сцена 3: Личный пример (0:12 – 0:20)
-Речь: «Я вчера решил проверить лично. Закинул всего 700 рупий, дождался извержения вулкана и — бум! — вывел 5450 рупий. Чистый кайф! И самое главное, всё максимально честно».
-В кадре: Фокус (зум) на экран смартфона.
-Действие на экране: Демонстрация игры Coin Volcano.
-Ставка: 700 INR.
-Экшн: Активируется бонусный раунд. Видно, как сверху «взрываются» вулканы, добавляя множители (x5, x10, x20) на монеты на поле.
-Финал: Выскакивает надпись «BIG WIN».
-Баланс: Мгновенно меняется на 5450 INR.
+ФОРМАТ ОТВЕТА — строго такой, без отступлений:
 
-Сцена 4: Доверие (0:20 – 0:28)
-Речь: «Деньги упали на PhonePe моментально, даже ждать не пришлось. Смотри сам, вот мои уведомления о выплатах. Всё четко, без задержек и лишних вопросов».
-В кадре: Актер сияет от радости, показывает жест «ОК» 👌.
-Действие на экране: Интерфейс приложения PhonePe.
-Виден пуш от банка: «Payment Received: ₹5,450» (зеленым цветом).
-Ниже в истории транзакций еще 2-3 подобные выплаты за сегодня.
-Звуковой эффект: Фирменный «дзынь» PhonePe или звук уведомления о деньгах.
+──────────────────────────
+GEO: [страна / регион]
+LANGUAGE: [язык креативов]
+CREATIVES: [число]
+FORMAT: [формат — например: статика, видео, карусель]
+SIZE: [размеры — например: 1080x1080, 1080x1920]
+CURRENCY: [валюта]
+BONUS: [условия бонуса или «нет»]
+──────────────────────────
+КОММЕНТАРИЙ ЗАКАЗЧИКА:
+[дословный текст от заказчика — без изменений, без сокращений]
+──────────────────────────
+ДЕТАЛИ ЗАКАЗА:
+Оффер: [название продукта / оффера]
+Площадка: [где крутится реклама]
+ЦА: [целевая аудитория, если указана]
+Дедлайн: [если указан]
+Дополнительно: [всё остальное важное из задачи — требования, ограничения, пожелания]
+──────────────────────────
 
-Сцена 5: Призыв к действию (0:28 – 0:35)
-Речь: «Если еще не пробовал — не тормози. Когда набежит толпа, такие множители ловить будет в разы сложнее. Закинул немного, выбил бонусы с вулканов и сразу вывел профит. Качай Coin Volcano по ссылке ниже и забирай свои деньги. Кнопка прямо под видео!»
-В кадре: Актер указывает пальцем вниз.
-Действие на экране: * В центре — крупная пульсирующая кнопка «PLAY NOW».
-Анимированные стрелки, указывающие вниз.
-Текст: «LIMITED SLOTS! ⏳»
-Финал: Актер показывает большой палец вверх, экран засыпает золотыми монетами
+Если каких-то данных нет в задаче — в самом конце, отдельным блоком:
+НЕ УКАЗАНО / УТОЧНИТЬ:
+- [список полей, которые нужно уточнить у заказчика]
+"""
+
+# ── Состояния ─────────────────────────────────────────────────────────────────
+# "idle"    — ждём нажатия «Загрузить ТЗ»
+# "loading" — принимаем сообщения в буфер
+
+user_states: dict[int, str] = {}
+user_text_buffers: dict[int, list[str]] = {}
+# (chat_id, message_id) для пересылки медиа
+user_media_buffers: dict[int, list[tuple[int, int]]] = {}
+
+CB_LOAD      = "cb_load"
+CB_STRUCTURE = "cb_structure"
+CB_CANCEL    = "cb_cancel"
 
 
-------------------------------------------------------------
+def get_state(uid: int) -> str:
+    return user_states.get(uid, "idle")
 
-Таск #2
+def set_state(uid: int, state: str) -> None:
+    user_states[uid] = state
 
-Сценарий 2: Coin Volcano - Два парня на улице (POV)
-Общая стилистика: Съемка от первого лица (POV), эффект «случайной встречи».
-Персонаж: Молодой парень, стиль "casual" (рубашка, часы, золотая цепь), сидит на ярком мотоцикле (Yamaha R15 или подобный).
-Валюта: Строго символ ₹ или INR.
-Субтитры: добавить крупные субтитры на английском, появляются синхронно с речью.
-Речь: Английский с индийским акцентом.
-Интерфейс приложения PhonePe желательно повторить, чтоб как оригинал выглядело.
+def clear_buffers(uid: int) -> None:
+    user_text_buffers[uid] = []
+    user_media_buffers[uid] = []
 
-Сцена 1: Завязка (0:00 – 0:05)
-Действие в кадре: Оператор быстро подходит к парню, который сидит на мотоцикле и увлеченно смотрит в телефон. Парень делает вид, что пытается спрятать экран.
-Диалог:
-Оператор: Эй, бро! Чем ты тут занят? Снова какие-то секретные схемы?
-Парень: Да не, забей, просто дела решаю.
-Оператор: Ну-ка покажи! Что ты там прячешь? Дай гляну!
-Текст на экране (Титры): «Секрет его заработка? 🤫»
+def btn_load() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Загрузить ТЗ", callback_data=CB_LOAD)
+    ]])
 
-Сцена 2: Пруфы / Баланс (0:05 – 0:10)
-Действие в кадре: Парень со вздохом «сдается» и поворачивает экран к камере. Камера фокусируется на телефоне.
+def btn_working() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Структурировать", callback_data=CB_STRUCTURE),
+        InlineKeyboardButton("Отмена", callback_data=CB_CANCEL),
+    ]])
+
+def split_message(text: str, max_len: int = 4000) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+    parts = []
+    while text:
+        parts.append(text[:max_len])
+        text = text[max_len:]
+    return parts
+
+async def ask_gpt(full_text: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": full_text},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content
+
+def count_label(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} сообщение"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} сообщения"
+    return f"{n} сообщений"
+
+
+# ── Хэндлеры ─────────────────────────────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    set_state(uid, "idle")
+    clear_buffers(uid)
+    await update.message.reply_text(
+        "Нажми кнопку чтобы начать загрузку ТЗ.",
+        reply_markup=btn_load(),
+    )
+
+
+async def cb_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    set_state(uid, "loading")
+    clear_buffers(uid)
+    await query.message.reply_text(
+        "Готов принимать. Пересылай сообщения с задачей — текст, фото, файлы, всё что есть.\n"
+        "Когда закончишь — нажми «Структурировать».",
+        reply_markup=btn_working(),
+    )
+
+
+async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    set_state(uid, "idle")
+    clear_buffers(uid)
+    await query.message.reply_text(
+        "Отменено. Буфер очищен.",
+        reply_markup=btn_load(),
+    )
+
+
+async def cb_structure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+
+    text_buf  = user_text_buffers.get(uid, [])
+    media_buf = user_media_buffers.get(uid, [])
+
+    if not text_buf and not media_buf:
+        await query.message.reply_text(
+            "Буфер пустой — сначала загрузи сообщения.",
+            reply_markup=btn_load(),
+        )
+        return
+
+    if not text_buf:
+        await query.message.reply_text(
+            "Нет текста для анализа. Добавь хотя бы одно текстовое сообщение с описанием задачи.",
+            reply_markup=btn_working(),
+        )
+        return
+
+    await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+
+    full_text = "\n\n---\n\n".join(text_buf)
+
+    try:
+        reply = await ask_gpt(full_text)
+    except Exception as e:
+        logger.error("GPT error: %s", e)
+        await query.message.reply_text("Ошибка при обращении к GPT. Попробуй ещё раз.")
+        return
+
+    # Снимаем снепшот и сбрасываем
+    media_snap = list(media_buf)
+    set_state(uid, "idle")
+    clear_buffers(uid)
+
+    # 1. Структурированное ТЗ
+    for chunk in split_message(reply):
+        await query.message.reply_text(chunk)
+
+    # 2. Материалы — пересылаем оригиналы
+    if media_snap:
+        await query.message.reply_text("Материалы от заказчика:")
+        for (chat_id, msg_id) in media_snap:
+            try:
+                await context.bot.forward_message(
+                    chat_id=query.message.chat_id,
+                    from_chat_id=chat_id,
+                    message_id=msg_id,
+                )
+            except Exception as e:
+                logger.warning("Не удалось переслать %s: %s", msg_id, e)
+
+    # 3. Готово
+    await query.message.reply_text(
+        "Готово. Для следующей задачи нажми кнопку.",
+        reply_markup=btn_load(),
+    )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    msg: Message = update.message
+
+    if get_state(uid) != "loading":
+        await msg.reply_text(
+            "Нажми «Загрузить ТЗ» чтобы начать.",
+            reply_markup=btn_load(),
+        )
+        return
+
+    text_buf  = user_text_buffers.setdefault(uid, [])
+    media_buf = user_media_buffers.setdefault(uid, [])
+
+    has_media = bool(
+        msg.photo or msg.video or msg.document or
+        msg.audio or msg.voice or msg.sticker or msg.animation
+    )
+
+    # Текст или подпись к медиа
+    if msg.text:
+        text_buf.append(msg.text.strip())
+    elif msg.caption:
+        text_buf.append(msg.caption.strip())
+
+    # Медиа — сохраняем для пересылки
+    if has_media:
+        media_buf.append((msg.chat_id, msg.message_id))
+
+    # Статус
+    parts = []
+    if text_buf:
+        parts.append(f"текст: {count_label(len(text_buf))}")
+    if media_buf:
+        parts.append(f"файлов/фото: {len(media_buf)}")
+    status = "Принято — " + ", ".join(parts) + "."
+
+    await msg.reply_text(status, reply_markup=btn_working())
+
+
+# ── Запуск ────────────────────────────────────────────────────────────────────
+def main() -> None:
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    app = ApplicationBuilder().token(token).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(cb_load,      pattern=CB_LOAD))
+    app.add_handler(CallbackQueryHandler(cb_cancel,    pattern=CB_CANCEL))
+    app.add_handler(CallbackQueryHandler(cb_structure, pattern=CB_STRUCTURE))
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.PHOTO | filters.VIDEO |
+         filters.Document.ALL | filters.AUDIO | filters.VOICE) & ~filters.COMMAND,
+        handle_message,
+    ))
+
+    logger.info("Бот запущен.")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
 Что на экране: Открыто банковское приложение PhonePe.
 Крупная сумма: ₹ 8,42,150.00 (8.4 лакха рупий).
 Анимация: Зеленая галочка «Transfer Successful».
