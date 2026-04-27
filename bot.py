@@ -195,9 +195,13 @@ async def cb_structure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     set_state(uid, "idle")
     clear_buffers(uid)
 
-    # 1. Структурированное ТЗ
+# 1. Структурированное ТЗ
     for chunk in split_message(reply):
-        await query.message.reply_text(chunk)
+        try:
+            await query.message.reply_text(chunk)
+        except Exception as send_err:
+            logger.error("Send error: %s", send_err, exc_info=True)
+            await query.message.reply_text(chunk.encode("utf-8", errors="ignore").decode("utf-8"))
 
     # 2. Материалы — пересылаем оригиналы
     if media_snap:
