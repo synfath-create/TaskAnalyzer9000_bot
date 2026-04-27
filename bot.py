@@ -1,11 +1,12 @@
 import os
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
     CommandHandler,
+    CallbackQueryHandler,
     filters,
 )
 from openai import OpenAI
@@ -57,75 +58,33 @@ BONUS: [условия бонуса или «нет»]
 - [список полей, которые нужно уточнить у заказчика]
 """
 
-# ── История диалогов (in-memory, per user) ────────────────────────────────────
-user_histories: dict[int, list[dict]] = {}
+# ── Буфер сообщений (накапливаем до нажатия кнопки) ─────────────────────────
+# user_id -> список строк
+user_buffers: dict[int, list[str]] = {}
+
+BUTTON_LABEL = "Структурировать ТЗ"
+CALLBACK_STRUCTURE = "do_structure"
 
 
-def get_history(user_id: int) -> list[dict]:
-    if user_id not in user_histories:
-        user_histories[user_id] = []
-    return user_histories[user_id]
+def get_buffer(user_id: int) -> list[str]:
+    if user_id not in user_buffers:
+        user_buffers[user_id] = []
+    return user_buffers[user_id]
 
 
-async def ask_gpt(user_id: int, user_message: str) -> str:
-    history = get_history(user_id)
-    history.append({"role": "user", "content": user_message})
-
-    # Держим не более 20 сообщений, чтобы не переполнять контекст
-    trimmed = history[-20:]
-
+async def ask_gpt(full_text: str) -> str:
     response = client.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": SYSTEM_PROMPT}] + trimmed,
-        temperature=0.7,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": full_text},
+        ],
+        temperature=0.3,
     )
-    assistant_msg = response.choices[0].message.content
-    history.append({"role": "assistant", "content": assistant_msg})
-    return assistant_msg
-
-
-# ── Хэндлеры ─────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "👋 Привет! Я твой ассистент по задачам.\n\n"
-        "Отправь мне бриф, задачу или любые материалы — "
-        "я структурирую их, определю количество креативов "
-        "и напишу комментарий от лица заказчика.\n\n"
-        "Просто напиши что нужно сделать 👇"
-    )
-
-
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_histories[user_id] = []
-    await update.message.reply_text("🔄 История очищена. Начинаем заново!")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user_id = update.effective_user.id
-    user_text = update.message.text or ""
-
-    if not user_text.strip():
-        await update.message.reply_text("Пришли текст задачи или бриф 📝")
-        return
-
-    # Показываем индикатор печатания
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
-    try:
-        reply = await ask_gpt(user_id, user_text)
-        # Telegram ограничивает сообщение 4096 символами — делим при необходимости
-        for chunk in split_message(reply):
-            await update.message.reply_text(chunk, parse_mode=None)
-    except Exception as e:
-        logger.error("GPT error: %s", e)
-        await update.message.reply_text(
-            "⚠️ Произошла ошибка при обращении к GPT. Попробуй ещё раз."
-        )
+    return response.choices[0].message.content
 
 
 def split_message(text: str, max_len: int = 4000) -> list[str]:
-    """Разбивает длинный текст на части по max_len символов."""
     if len(text) <= max_len:
         return [text]
     parts = []
@@ -133,6 +92,69 @@ def split_message(text: str, max_len: int = 4000) -> list[str]:
         parts.append(text[:max_len])
         text = text[max_len:]
     return parts
+
+
+def structure_button() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(BUTTON_LABEL, callback_data=CALLBACK_STRUCTURE)]]
+    )
+
+
+# ── Хэндлеры ─────────────────────────────────────────────────────────────────
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Отправляй сообщения с задачей — можно несколько подряд.\n"
+        "Когда всё скинешь, нажми кнопку «Структурировать ТЗ»."
+    )
+
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    user_buffers[user_id] = []
+    await update.message.reply_text("Буфер очищен. Жду новую задачу.")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    text = (update.message.text or "").strip()
+
+    if not text:
+        return
+
+    buf = get_buffer(user_id)
+    buf.append(text)
+
+    # Показываем кнопку после каждого сообщения
+    count = len(buf)
+    status = f"Принято ({count} {'сообщение' if count == 1 else 'сообщения' if count < 5 else 'сообщений'}). Добавь ещё или нажми кнопку."
+    await update.message.reply_text(status, reply_markup=structure_button())
+
+
+async def handle_structure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    user_id = query.from_user.id
+    buf = get_buffer(user_id)
+
+    if not buf:
+        await query.message.reply_text("Нет сообщений для обработки. Сначала отправь задачу.")
+        return
+
+    await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+
+    full_text = "\n\n---\n\n".join(buf)
+
+    try:
+        reply = await ask_gpt(full_text)
+        # Очищаем буфер после успешной обработки
+        user_buffers[user_id] = []
+        for chunk in split_message(reply):
+            await query.message.reply_text(chunk, parse_mode=None)
+        await query.message.reply_text("Буфер очищен. Жду следующую задачу.")
+    except Exception as e:
+        logger.error("GPT error: %s", e)
+        await query.message.reply_text("Ошибка при обращении к GPT. Попробуй ещё раз.")
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
@@ -143,6 +165,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(handle_structure, pattern=CALLBACK_STRUCTURE))
 
     logger.info("Бот запущен. Ожидаю сообщения...")
     app.run_polling()
