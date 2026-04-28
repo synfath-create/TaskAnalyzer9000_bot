@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ── Клиенты ───────────────────────────────────────────────────────────────────
 openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+gemini_model = genai.GenerativeModel("gemini-1.5-pro-latest")
 
 # ── Промпты ───────────────────────────────────────────────────────────────────
 GEMINI_VIDEO_PROMPT = """Ты анализируешь рекламный видео-креатив. Без вводных фраз, без смайлов.
