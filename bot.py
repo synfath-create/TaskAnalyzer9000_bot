@@ -1,5 +1,6 @@
 import os
 import logging
+import tempfile
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,93 +11,126 @@ from telegram.ext import (
     filters,
 )
 from openai import OpenAI
-
+import google.generativeai as genai
+ 
 # ── Логирование ───────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-# ── Клиент OpenAI ─────────────────────────────────────────────────────────────
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-
-# ── Системный промпт ──────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """Ты — менеджер по рекламным задачам. Твоя работа — аккуратно и точно структурировать входящий бриф или задачу.
-
+ 
+# ── Клиенты ───────────────────────────────────────────────────────────────────
+openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+gemini_model = genai.GenerativeModel("gemini-1.5-pro")
+ 
+# ── Промпты ───────────────────────────────────────────────────────────────────
+ 
+GEMINI_VIDEO_PROMPT = """Ты анализируешь рекламный видео-креатив. Без вводных фраз, без смайлов.
+ 
+Проанализируй видео и выдай строго в этом формате:
+ 
+АНАЛИЗ ВИДЕО:
+Хронометраж: [общая длительность]
+Структура:
+- [0:00-0:XX] [что происходит]
+- [продолжай по каждому смысловому блоку]
+ 
+Визуал: [локация, освещение, цветовая гамма, стиль съёмки]
+Темп монтажа: [медленный / средний / быстрый, cuts каждые N секунд]
+Озвучка: [есть/нет, мужская/женская, тон, дословно основные фразы если слышно]
+Субтитры: [есть/нет, цвет, позиция]
+Музыка: [есть/нет, характер]
+CTA: [есть/нет, текст, тайминг появления]
+Формат: [соотношение сторон]
+Технические особенности: [всё остальное важное]"""
+ 
+GPT_STRUCTURE_PROMPT = """Ты — менеджер по рекламным задачам. Ты получаешь:
+1. Анализ референс-видео от Gemini
+2. Текст ТЗ от заказчика
+ 
+Твоя задача — сопоставить их, структурировать ТЗ и составить план в работу.
+ 
 СТРОГИЕ ПРАВИЛА:
 - Никаких смайлов, emoji, звёздочек, украшений.
-- Никаких пояснений, интерпретаций, «простых слов» — только факты из задачи.
-- Все тексты (озвучка, субтитры, CTA) — копируешь ДОСЛОВНО, слово в слово, без единого изменения.
-- Комментарий заказчика — только общие требования и пожелания, без текстов озвучки (они идут отдельным блоком).
-- Если поле не указано в задаче — пишешь: не указано.
-- Никаких вводных фраз типа «Конечно!», «Вот структура», «Отлично» и т.п.
-- В блок "НЕ УКАЗАНО / УТОЧНИТЬ" включать ТОЛЬКО: Currency, Bonus, и другие реально отсутствующие технические параметры. ЦА и дедлайн туда НЕ включать.
-
-ФОРМАТ ОТВЕТА — строго такой, без отступлений:
-
+- Только факты — никаких интерпретаций и воды.
+- Тексты озвучки/субтитры/CTA — дословно как у заказчика.
+- Если поле не указано — пишешь: не указано.
+- Никаких вводных фраз.
+- В "НЕ УКАЗАНО / УТОЧНИТЬ" — только реально отсутствующие технические параметры.
+ 
+ФОРМАТ ОТВЕТА:
+ 
 ──────────────────────────
 GEO: [страна / регион]
 LANGUAGE: [язык креативов]
 CREATIVES: [число]
-FORMAT: [формат — например: статика, видео, карусель]
-SIZE: [размеры — например: 1080x1080, 1080x1920]
+FORMAT: [статика / видео / карусель]
+SIZE: [размеры]
 CURRENCY: [валюта]
-BONUS: [условия бонуса или «нет»]
+BONUS: [условия или «нет»]
 ──────────────────────────
 КОММЕНТАРИЙ ЗАКАЗЧИКА:
-[общие требования и пожелания заказчика — дословно, без изменений. Без текстов озвучки и субтитров — они идут ниже]
+[общие требования дословно, без текстов озвучки]
 ──────────────────────────
 ДЕТАЛИ ЗАКАЗА:
-Оффер: [название продукта / оффера]
-Площадка: [где крутится реклама]
-Дополнительно: [структурированное описание задачи — логика крео, структура, особенности. Кратко и по делу]
+Оффер: [продукт / оффер]
+Площадка: [площадка]
+Дополнительно: [логика крео, структура, особенности — кратко]
 ──────────────────────────
-[ЭТОТ БЛОК ДОБАВЛЯТЬ ТОЛЬКО ЕСЛИ В ЗАДАЧЕ ЕСТЬ ТЕКСТЫ ДЛЯ ОЗВУЧКИ ИЛИ СУБТИТРОВ]
+[только если есть тексты озвучки или субтитров]
 ТЕКСТЫ / ОЗВУЧКА:
-[все тексты дословно, с сохранением нумерации и структуры как у заказчика]
+[дословно с нумерацией как у заказчика]
 ──────────────────────────
-
-Если не хватает важных технических данных — в самом конце:
+АНАЛИЗ РЕФЕРЕНСА:
+[вставь сюда анализ видео от Gemini — структуру, тайминги, визуал, озвучку, CTA]
+──────────────────────────
+СОПОСТАВЛЕНИЕ:
+[3-5 строк — что в видео совпадает с ТЗ, что расходится, на что обратить внимание]
+──────────────────────────
+ПЛАН В РАБОТУ:
+[нумерованный чеклист конкретных шагов для реализации этого крео — от съёмки до финального файла]
+──────────────────────────
+ 
+Если не хватает технических параметров:
 НЕ УКАЗАНО / УТОЧНИТЬ:
-- [только реально отсутствующие технические параметры]
-"""
-
+- [список]"""
+ 
 # ── Состояния ─────────────────────────────────────────────────────────────────
-# "idle"    — ждём нажатия «Загрузить ТЗ»
-# "loading" — принимаем сообщения в буфер
-
 user_states: dict[int, str] = {}
 user_text_buffers: dict[int, list[str]] = {}
-# (chat_id, message_id) для пересылки медиа
 user_media_buffers: dict[int, list[tuple[int, int]]] = {}
-
+# video: (file_id, mime_type)
+user_video_buffers: dict[int, list[tuple[str, str]]] = {}
+ 
 CB_LOAD      = "cb_load"
 CB_STRUCTURE = "cb_structure"
 CB_CANCEL    = "cb_cancel"
-
-
+ 
+ 
 def get_state(uid: int) -> str:
     return user_states.get(uid, "idle")
-
+ 
 def set_state(uid: int, state: str) -> None:
     user_states[uid] = state
-
+ 
 def clear_buffers(uid: int) -> None:
     user_text_buffers[uid] = []
     user_media_buffers[uid] = []
-
+    user_video_buffers[uid] = []
+ 
 def btn_load() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("Загрузить ТЗ", callback_data=CB_LOAD)
     ]])
-
+ 
 def btn_working() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[
         InlineKeyboardButton("Структурировать", callback_data=CB_STRUCTURE),
         InlineKeyboardButton("Отмена", callback_data=CB_CANCEL),
     ]])
-
+ 
 def split_message(text: str, max_len: int = 4000) -> list[str]:
     if len(text) <= max_len:
         return [text]
@@ -105,26 +139,64 @@ def split_message(text: str, max_len: int = 4000) -> list[str]:
         parts.append(text[:max_len])
         text = text[max_len:]
     return parts
-
-async def ask_gpt(full_text: str) -> str:
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": full_text},
-        ],
-        temperature=0.3,
-    )
-    return response.choices[0].message.content
-
+ 
 def count_label(n: int) -> str:
     if n % 10 == 1 and n % 100 != 11:
         return f"{n} сообщение"
     if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
         return f"{n} сообщения"
     return f"{n} сообщений"
-
-
+ 
+ 
+# ── Анализ видео через Gemini ─────────────────────────────────────────────────
+async def analyze_video_gemini(video_bytes: bytes, mime_type: str) -> str:
+    try:
+        # Загружаем файл в Gemini Files API
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+ 
+        uploaded = genai.upload_file(path=tmp_path, mime_type=mime_type)
+ 
+        # Ждём пока файл обработается
+        import time
+        while uploaded.state.name == "PROCESSING":
+            time.sleep(2)
+            uploaded = genai.get_file(uploaded.name)
+ 
+        response = gemini_model.generate_content([GEMINI_VIDEO_PROMPT, uploaded])
+ 
+        # Удаляем файл из Gemini после анализа
+        genai.delete_file(uploaded.name)
+        os.unlink(tmp_path)
+ 
+        return response.text
+    except Exception as e:
+        logger.error("Gemini video error: %s", e, exc_info=True)
+        return f"Видео не удалось проанализировать: {e}"
+ 
+ 
+# ── Структуризация через GPT ───────────────────────────────────────────────────
+async def structure_with_gpt(tz_text: str, video_analysis: str | None) -> str:
+    if video_analysis:
+        user_content = (
+            f"АНАЛИЗ ВИДЕО (от Gemini):\n{video_analysis}\n\n"
+            f"ТЗ ОТ ЗАКАЗЧИКА:\n{tz_text}"
+        )
+    else:
+        user_content = f"ТЗ ОТ ЗАКАЗЧИКА:\n{tz_text}"
+ 
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": GPT_STRUCTURE_PROMPT},
+            {"role": "user",   "content": user_content},
+        ],
+        temperature=0.3,
+    )
+    return response.choices[0].message.content
+ 
+ 
 # ── Хэндлеры ─────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
@@ -134,8 +206,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Нажми кнопку чтобы начать загрузку ТЗ.",
         reply_markup=btn_load(),
     )
-
-
+ 
+ 
 async def cb_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -143,283 +215,89 @@ async def cb_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     set_state(uid, "loading")
     clear_buffers(uid)
     await query.message.reply_text(
-        "Готов принимать. Пересылай сообщения с задачей — текст, фото, файлы, всё что есть.\n"
+        "Готов принимать. Пересылай всё — текст, видео-референсы, фото, файлы.\n"
         "Когда закончишь — нажми «Структурировать».",
         reply_markup=btn_working(),
     )
-
-
+ 
+ 
 async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
     set_state(uid, "idle")
     clear_buffers(uid)
-    await query.message.reply_text(
-        "Отменено. Буфер очищен.",
-        reply_markup=btn_load(),
-    )
-
-
+    await query.message.reply_text("Отменено. Буфер очищен.", reply_markup=btn_load())
+ 
+ 
 async def cb_structure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     uid = query.from_user.id
-
+ 
     text_buf  = user_text_buffers.get(uid, [])
     media_buf = user_media_buffers.get(uid, [])
-
-    if not text_buf and not media_buf:
-        await query.message.reply_text(
-            "Буфер пустой — сначала загрузи сообщения.",
-            reply_markup=btn_load(),
-        )
+    video_buf = user_video_buffers.get(uid, [])
+ 
+    if not text_buf and not media_buf and not video_buf:
+        await query.message.reply_text("Буфер пустой — сначала загрузи сообщения.", reply_markup=btn_load())
         return
-
+ 
     if not text_buf:
         await query.message.reply_text(
-            "Нет текста для анализа. Добавь хотя бы одно текстовое сообщение с описанием задачи.",
+            "Нет текста для анализа. Добавь описание задачи.",
             reply_markup=btn_working(),
         )
         return
-
-    await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
-
-    full_text = "\n\n---\n\n".join(text_buf)
-
-    try:
-        reply = await ask_gpt(full_text)
-    except Exception as e:
-        logger.error("GPT error: %s", e)
-        await query.message.reply_text("Ошибка при обращении к GPT. Попробуй ещё раз.")
-        return
-
-    # Снимаем снепшот и сбрасываем
-    media_snap = list(media_buf)
+ 
     set_state(uid, "idle")
+    media_snap = list(media_buf)
+    video_snap = list(video_buf)
+    full_text  = "\n\n---\n\n".join(text_buf)
     clear_buffers(uid)
-
-    # 1. Структурированное ТЗ
-    for chunk in split_message(reply):
-        await query.message.reply_text(chunk)
-
-    # 2. Материалы — пересылаем оригиналы
-    if media_snap:
-        await query.message.reply_text("Материалы от заказчика:")
-        for (chat_id, msg_id) in media_snap:
+ 
+    await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+ 
+    # 1. Анализируем видео если есть
+    video_analysis = None
+    if video_snap:
+        await query.message.reply_text(
+            f"Анализирую {'видео' if len(video_snap) == 1 else str(len(video_snap)) + ' видео'} через Gemini..."
+        )
+        analyses = []
+        for idx, (file_id, mime_type) in enumerate(video_snap, 1):
             try:
-                await context.bot.forward_message(
-                    chat_id=query.message.chat_id,
-                    from_chat_id=chat_id,
-                    message_id=msg_id,
-                )
+                await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
+                tg_file = await context.bot.get_file(file_id)
+                video_bytes = await tg_file.download_as_bytearray()
+                result = await analyze_video_gemini(bytes(video_bytes), mime_type)
+                label = f"Видео {idx}:" if len(video_snap) > 1 else ""
+                analyses.append(f"{label}\n{result}".strip())
             except Exception as e:
-                logger.warning("Не удалось переслать %s: %s", msg_id, e)
-
-    # 3. Готово
-    await query.message.reply_text(
-        "Готово. Для следующей задачи нажми кнопку.",
-        reply_markup=btn_load(),
-    )
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = update.effective_user.id
-    msg: Message = update.message
-
-    if get_state(uid) != "loading":
-        await msg.reply_text(
-            "Нажми «Загрузить ТЗ» чтобы начать.",
-            reply_markup=btn_load(),
-        )
-        return
-
-    text_buf  = user_text_buffers.setdefault(uid, [])
-    media_buf = user_media_buffers.setdefault(uid, [])
-
-    has_media = bool(
-        msg.photo or msg.video or msg.document or
-        msg.audio or msg.voice or msg.sticker or msg.animation
-    )
-
-    # Текст или подпись к медиа
-    if msg.text:
-        text_buf.append(msg.text.strip())
-    elif msg.caption:
-        text_buf.append(msg.caption.strip())
-
-    # Медиа — сохраняем для пересылки
-    if has_media:
-        media_buf.append((msg.chat_id, msg.message_id))
-
-    # Статус
-    parts = []
-    if text_buf:
-        parts.append(f"текст: {count_label(len(text_buf))}")
-    if media_buf:
-        parts.append(f"файлов/фото: {len(media_buf)}")
-    status = "Принято — " + ", ".join(parts) + "."
-
-    await msg.reply_text(status, reply_markup=btn_working())
-
-
-# ── Запуск ────────────────────────────────────────────────────────────────────
-def main() -> None:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    app = ApplicationBuilder().token(token).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(cb_load,      pattern=CB_LOAD))
-    app.add_handler(CallbackQueryHandler(cb_cancel,    pattern=CB_CANCEL))
-    app.add_handler(CallbackQueryHandler(cb_structure, pattern=CB_STRUCTURE))
-    app.add_handler(MessageHandler(
-        (filters.TEXT | filters.PHOTO | filters.VIDEO |
-         filters.Document.ALL | filters.AUDIO | filters.VOICE) & ~filters.COMMAND,
-        handle_message,
-    ))
-
-    logger.info("Бот запущен.")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
-CB_STRUCTURE = "cb_structure"
-CB_CANCEL    = "cb_cancel"
-
-
-def get_state(uid: int) -> str:
-    return user_states.get(uid, "idle")
-
-def set_state(uid: int, state: str) -> None:
-    user_states[uid] = state
-
-def clear_buffers(uid: int) -> None:
-    user_text_buffers[uid] = []
-    user_media_buffers[uid] = []
-
-def btn_load() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("Загрузить ТЗ", callback_data=CB_LOAD)
-    ]])
-
-def btn_working() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("Структурировать", callback_data=CB_STRUCTURE),
-        InlineKeyboardButton("Отмена", callback_data=CB_CANCEL),
-    ]])
-
-def split_message(text: str, max_len: int = 4000) -> list[str]:
-    if len(text) <= max_len:
-        return [text]
-    parts = []
-    while text:
-        parts.append(text[:max_len])
-        text = text[max_len:]
-    return parts
-
-async def ask_gpt(full_text: str) -> str:
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": full_text},
-        ],
-        temperature=0.3,
-    )
-    return response.choices[0].message.content
-
-def count_label(n: int) -> str:
-    if n % 10 == 1 and n % 100 != 11:
-        return f"{n} сообщение"
-    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
-        return f"{n} сообщения"
-    return f"{n} сообщений"
-
-
-# ── Хэндлеры ─────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = update.effective_user.id
-    set_state(uid, "idle")
-    clear_buffers(uid)
-    await update.message.reply_text(
-        "Нажми кнопку чтобы начать загрузку ТЗ.",
-        reply_markup=btn_load(),
-    )
-
-
-async def cb_load(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    set_state(uid, "loading")
-    clear_buffers(uid)
-    await query.message.reply_text(
-        "Готов принимать. Пересылай сообщения с задачей — текст, фото, файлы, всё что есть.\n"
-        "Когда закончишь — нажми «Структурировать».",
-        reply_markup=btn_working(),
-    )
-
-
-async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-    set_state(uid, "idle")
-    clear_buffers(uid)
-    await query.message.reply_text(
-        "Отменено. Буфер очищен.",
-        reply_markup=btn_load(),
-    )
-
-
-async def cb_structure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
-
-    text_buf  = user_text_buffers.get(uid, [])
-    media_buf = user_media_buffers.get(uid, [])
-
-    if not text_buf and not media_buf:
-        await query.message.reply_text(
-            "Буфер пустой — сначала загрузи сообщения.",
-            reply_markup=btn_load(),
-        )
-        return
-
-    if not text_buf:
-        await query.message.reply_text(
-            "Нет текста для анализа. Добавь хотя бы одно текстовое сообщение с описанием задачи.",
-            reply_markup=btn_working(),
-        )
-        return
-
+                logger.error("Video download/analyze error: %s", e, exc_info=True)
+                analyses.append(f"Видео {idx}: не удалось обработать — {e}")
+        video_analysis = "\n\n".join(analyses)
+ 
+    # 2. Структурируем через GPT
     await context.bot.send_chat_action(chat_id=query.message.chat_id, action="typing")
-
-    full_text = "\n\n---\n\n".join(text_buf)
-
     try:
-        reply = await ask_gpt(full_text)
+        reply = await structure_with_gpt(full_text, video_analysis)
     except Exception as e:
-        logger.error("GPT error: %s", e)
+        logger.error("GPT error: %s", e, exc_info=True)
         await query.message.reply_text("Ошибка при обращении к GPT. Попробуй ещё раз.")
         return
-
-    # Снимаем снепшот и сбрасываем
-    media_snap = list(media_buf)
-    set_state(uid, "idle")
-    clear_buffers(uid)
-
-# 1. Структурированное ТЗ
+ 
+    # 3. Отправляем результат
     for chunk in split_message(reply):
         try:
             await query.message.reply_text(chunk)
         except Exception as send_err:
             logger.error("Send error: %s", send_err, exc_info=True)
-            await query.message.reply_text(chunk.encode("utf-8", errors="ignore").decode("utf-8"))
-
-    # 2. Материалы — пересылаем оригиналы
+            await query.message.reply_text(
+                chunk.encode("utf-8", errors="ignore").decode("utf-8")
+            )
+ 
+    # 4. Пересылаем медиа (не видео — они уже проанализированы)
     if media_snap:
         await query.message.reply_text("Материалы от заказчика:")
         for (chat_id, msg_id) in media_snap:
@@ -431,59 +309,58 @@ async def cb_structure(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
             except Exception as e:
                 logger.warning("Не удалось переслать %s: %s", msg_id, e)
-
-    # 3. Готово
-    await query.message.reply_text(
-        "Готово. Для следующей задачи нажми кнопку.",
-        reply_markup=btn_load(),
-    )
-
-
+ 
+    await query.message.reply_text("Готово. Для следующей задачи нажми кнопку.", reply_markup=btn_load())
+ 
+ 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     msg: Message = update.message
-
+ 
     if get_state(uid) != "loading":
-        await msg.reply_text(
-            "Нажми «Загрузить ТЗ» чтобы начать.",
-            reply_markup=btn_load(),
-        )
+        await msg.reply_text("Нажми «Загрузить ТЗ» чтобы начать.", reply_markup=btn_load())
         return
-
+ 
     text_buf  = user_text_buffers.setdefault(uid, [])
     media_buf = user_media_buffers.setdefault(uid, [])
-
-    has_media = bool(
-        msg.photo or msg.video or msg.document or
-        msg.audio or msg.voice or msg.sticker or msg.animation
-    )
-
-    # Текст или подпись к медиа
+    video_buf = user_video_buffers.setdefault(uid, [])
+ 
+    is_video = bool(msg.video or msg.document and msg.document.mime_type and msg.document.mime_type.startswith("video/"))
+    is_media = bool(msg.photo or msg.audio or msg.voice or msg.sticker or msg.animation or
+                    (msg.document and not (msg.document.mime_type and msg.document.mime_type.startswith("video/"))))
+ 
+    # Текст или подпись
     if msg.text:
         text_buf.append(msg.text.strip())
     elif msg.caption:
         text_buf.append(msg.caption.strip())
-
-    # Медиа — сохраняем для пересылки
-    if has_media:
+ 
+    # Видео — отдельный буфер для Gemini
+    if msg.video:
+        video_buf.append((msg.video.file_id, msg.video.mime_type or "video/mp4"))
+    elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith("video/"):
+        video_buf.append((msg.document.file_id, msg.document.mime_type))
+    elif is_media:
         media_buf.append((msg.chat_id, msg.message_id))
-
+ 
     # Статус
     parts = []
     if text_buf:
         parts.append(f"текст: {count_label(len(text_buf))}")
+    if video_buf:
+        parts.append(f"видео: {len(video_buf)}")
     if media_buf:
         parts.append(f"файлов/фото: {len(media_buf)}")
     status = "Принято — " + ", ".join(parts) + "."
-
+ 
     await msg.reply_text(status, reply_markup=btn_working())
-
-
+ 
+ 
 # ── Запуск ────────────────────────────────────────────────────────────────────
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = ApplicationBuilder().token(token).build()
-
+ 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(cb_load,      pattern=CB_LOAD))
     app.add_handler(CallbackQueryHandler(cb_cancel,    pattern=CB_CANCEL))
@@ -493,10 +370,10 @@ def main() -> None:
          filters.Document.ALL | filters.AUDIO | filters.VOICE) & ~filters.COMMAND,
         handle_message,
     ))
-
+ 
     logger.info("Бот запущен.")
     app.run_polling()
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
